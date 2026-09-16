@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+.venv/
+.idea/
+__pycache__/
+*.py[cod]
+logs/
+data/raw/
+data/processed/
