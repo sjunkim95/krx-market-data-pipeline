@@ -8,3 +8,5 @@ __pycache__/
 logs/
 data/raw/
 data/processed/
+.RData
+.Rhistory

@@ -1,11 +1,15 @@
-# KRX KOSPI 일별 데이터 파이프라인
+# KRX KOSPI 데이터 파이프라인과 시장 분석
 
-KRX API에서 KOSPI 종목별 일별 시장 데이터를 수집하고, 정제·검증한 뒤 PostgreSQL에 저장하는 Python 프로젝트입니다. 날짜별 재실행, 과거 데이터 수집, 일일 예약 실행을 직접 구현하며 데이터 적재 과정을 학습했습니다.
+KRX API에서 KOSPI 종목별 일별 시장 데이터를 수집하고, Python으로 정제·검증한 뒤 PostgreSQL에 저장합니다. 저장한 데이터를 R로 분석하고 Tableau로 시각화해, 수집부터 운영 자동화와 데이터 활용까지 연결한 프로젝트입니다.
+
+Python은 날짜별 재실행·과거 데이터 수집·일일 자동 복구를 담당합니다. R에서는 거래대금 급증과 가격 변동의 관계를 살펴보고, Tableau에서는 시장 현황과 개별 종목의 흐름을 확인합니다.
 
 ## 처리 흐름
 
 ```text
 KRX API → Raw JSON → pandas 정제 → CSV → 데이터 검증 → PostgreSQL
+                                                       ├─ R 탐색 분석 → PNG 그래프
+                                                       └─ Tableau 시장 대시보드
 ```
 
 - **Extract:** 조회 날짜의 API 응답을 JSON으로 보관합니다. HTTP 오류나 응답 형식 오류는 실패로 처리합니다.
@@ -35,6 +39,76 @@ KRX API → Raw JSON → pandas 정제 → CSV → 데이터 검증 → PostgreS
 
 DB에 없는 날짜는 기존 KRX 조회의 SKIP 기록과 대조했습니다. 별도 공식 거래일 달력과 대조한 결과는 아닙니다. 운영 데이터와 로그는 저장소에 포함하지 않습니다.
 
+## R 분석: 거래대금 급증과 가격 변동
+
+분석 코드: [r/krx_analysis.R](r/krx_analysis.R)
+
+PostgreSQL의 `kospi_daily_prices` 전체 데이터를 읽어 종목별 일별 관측치를 분석합니다. `change_rate`는 상승·하락 부호가 있는 등락률, `abs(change_rate)`는 방향을 제거한 변동 크기입니다. 아래 분석 결과는 R 실행 시점에 PostgreSQL에 적재되어 있던 전체 데이터를 기준으로 하며, 앞서 제시한 backfill 검증 기간과는 표본 범위가 다를 수 있습니다. DB 데이터가 추가된 후 다시 실행하면 결과도 달라질 수 있습니다.
+
+### 분석 기준
+
+종목별 거래 규모 차이를 고려해 다음 비율을 계산합니다.
+
+```text
+Trading value spike ratio = 당일 거래대금 / 해당 종목의 전체 조회 기간 거래대금 중앙값
+```
+
+코드에서는 `ticker`, `stock_name`으로 그룹을 묶습니다. 중앙값이 0인 그룹은 제외하며, 이동 중앙값이나 과거 데이터만으로 계산한 기준은 아닙니다. 비율은 1배 미만, 1~2배 미만, 2~5배 미만, 5~10배 미만, 10배 이상으로 구분합니다.
+
+구간별 비교에서는 절대 등락률이 30%를 초과하는 관측치를 제외합니다. 앞의 산점도 두 개는 이 제외 조건을 적용하기 전 자료이며, 로그 축을 사용하는 거래대금 또는 비율은 양수인 값만 표시합니다.
+
+### 1. 거래대금과 부호가 있는 등락률
+
+전체 종목·날짜 관측치를 함께 보면 거래대금과 부호가 있는 등락률의 선형 관계는 매우 약하게 관찰됐습니다. 거래대금이 크다는 사실만으로 상승 또는 하락 방향을 설명하기는 어렵습니다. 코드에서는 원 거래대금과 로그 거래대금의 상관계수를 각각 계산합니다.
+
+![거래대금과 부호가 있는 등락률 산점도](images/trading_value_vs_change_rate.png)
+
+### 2. 거래대금 급증 비율과 절대 등락률
+
+종목별 중앙값으로 나눈 거래대금 급증 비율을 절대 등락률과 비교했습니다. 가격 방향보다 변동 크기에 초점을 둔 분석입니다.
+
+![거래대금 급증 비율과 절대 등락률 산점도](images/trading_value_spike_vs_abs_change.png)
+
+### 3. 급증 구간별 변동 크기와 큰 변동 발생 비율
+
+현재 분석에서는 거래대금 급증 구간이 높아질수록 평균 절대 등락률과 절대 등락률 5% 이상 관측치의 비율이 함께 증가했습니다.
+
+| 거래대금 급증 구간 | 평균 절대 등락률 | 5% 이상 변동 발생 비율 |
+|---|---:|---:|
+| Below 1x | 1.73% | 6.0% |
+| 1x–2x | 2.41% | 11.7% |
+| 2x–5x | 3.52% | 23.3% |
+| 5x–10x | 5.36% | 39.8% |
+| 10x+ | 9.25% | 59.9% |
+
+![거래대금 급증 구간별 평균 절대 등락률](images/avg_abs_change_by_spike.png)
+
+![거래대금 급증 구간별 5퍼센트 이상 변동 발생 비율](images/five_percent_move_frequency.png)
+
+### 4. 급증 구간별 상승·하락·보합 비율
+
+`10x+` 구간에서는 다른 구간보다 상승일 비중이 높게 관찰됐고, 같은 구간 안에서도 상승 비중이 하락 비중보다 컸습니다. 여기서 비중은 종목·날짜 관측치 기준이며, 다음 거래일의 상승 확률을 뜻하지 않습니다.
+
+![거래대금 급증 구간별 상승 하락 보합 비율](images/price_direction_by_spike.png)
+
+이 결과는 현재 표본의 탐색적 비교입니다. 거래대금 급증이 가격 변동을 일으킨다는 인과관계나 투자 예측 성능을 검증한 것은 아닙니다. 전체 조회 기간의 중앙값을 사용하므로 매매 신호의 과거 성과 검증으로도 해석하지 않습니다.
+
+## Tableau 시각화
+
+워크북: [tableau/krx_market_dashboard.twb](tableau/krx_market_dashboard.twb)
+
+`KRX Market Overview` 대시보드는 PostgreSQL의 `kospi_daily_prices`를 연결해 다음 5개 시트로 시장 현황을 보여줍니다.
+
+| 시트 | 내용 |
+|---|---|
+| Daily Trading Value | 일별 총 거래대금 추이. 조 원 단위로 표시 |
+| Market Breadth | 일별 상승 종목 비율. 등락률이 양수이면 1, 아니면 0인 지표의 평균 |
+| Market Cap Top 10 | 선택 날짜의 시가총액 상위 10개 종목 비교. 조 원 단위로 표시 |
+| Selected Stock Price Trend | 선택한 종목의 가격 추이 |
+| Trading Value Top 10 | 선택 날짜의 거래대금 상위 10개 종목 비교. 조 원 단위로 표시 |
+
+`.twb`에는 화면과 연결 정의가 저장되어 있으며 DB 데이터 자체가 패키징되어 있지는 않습니다. Tableau에서 열고 본인의 PostgreSQL 접속 정보를 설정해야 합니다. 날짜와 종목 필터를 바꿔 조회할 수 있으며, 워크북을 여는 것만으로 Python 수집 작업이 실행되지는 않습니다.
+
 ## 프로젝트 구조
 
 ```text
@@ -47,6 +121,16 @@ src/
   run_pipeline.py
   run_backfill.py
   run_daily_pipeline.py
+r/
+  krx_analysis.R
+images/
+  trading_value_vs_change_rate.png
+  trading_value_spike_vs_abs_change.png
+  avg_abs_change_by_spike.png
+  five_percent_move_frequency.png
+  price_direction_by_spike.png
+tableau/
+  krx_market_dashboard.twb
 run_daily_pipeline.bat
 requirements.txt
 .env.example
@@ -108,16 +192,36 @@ SMTP_PORT=587
 
 배치 파일은 프로젝트 루트로 이동한 뒤 `.venv`의 Python으로 일일 실행기를 호출합니다. SKIP 코드 `10`은 Windows에 정상 종료 `0`으로 전달합니다. 개별 단계 파일을 직접 실행하면 환경변수가 없는 경우 기존 기준일 `20260904`를 사용하므로, 날짜 지정은 실행기를 통해 하는 것을 권장합니다.
 
+### R 분석 실행
+
+R과 아래 패키지가 별도로 필요합니다. R 콘솔에서 한 번 설치합니다.
+
+```r
+install.packages(c("DBI", "RPostgres", "dplyr", "ggplot2", "dotenv"))
+```
+
+R도 Python과 같은 `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`를 사용합니다. **작업 디렉터리는 `r/`이어야 합니다.** 코드가 `../.env`에서 설정을 읽고 `../images`에 그래프를 저장하기 때문입니다.
+
+프로젝트 루트의 PowerShell에서 다음과 같이 실행합니다. `Rscript`가 PATH에 등록되어 있어야 합니다.
+
+```powershell
+Set-Location r
+Rscript krx_analysis.R
+Set-Location ..
+```
+
+실행하면 DB를 읽어 분석하고 PNG 5개를 갱신합니다. 이미지 배경은 흰색으로 저장됩니다. R 분석과 Tableau는 일일 Python 예약 작업에 포함되지 않으며 별도로 실행합니다.
+
 ## Windows Task Scheduler
 
-개발 PC에는 `KRX Daily Pipeline`을 매일 한국 시간 21:00에 실행하도록 등록하고 수동 실행을 확인했습니다. 다른 PC에서는 별도 등록이 필요합니다.
+개발 PC에는 `KRX Daily Pipeline`을 매일 지정 시간에 실행하도록 등록하고 수동 실행을 확인했습니다. 다른 PC에서는 별도 등록이 필요합니다.
 
 | 항목 | 설정 |
 |---|---|
 | 프로그램 | `C:\Windows\System32\cmd.exe` |
 | 인수 | `/d /c ""<프로젝트 절대 경로>\run_daily_pipeline.bat""` |
 | 시작 위치 | 프로젝트 절대 경로 |
-| 주기 | 매일 21:00, PC 시간대 기준 |
+| 주기 | 매일 지정 시간, PC 시간대 기준 |
 | 절전 | 작업 실행을 위해 절전 모드 해제 |
 | 실패 재시도 | 10분 간격, 최대 3회 |
 | 중복 실행 | 새 인스턴스를 시작하지 않음 |
@@ -130,3 +234,10 @@ SMTP_PORT=587
 - `logs/run_backfill.log`: 날짜별 요약, 일일 복구 실행 결과, 이메일 발송 결과
 
 마지막 적재일 이후 데이터가 늦게 제공되거나 PC가 꺼져 있었다면 다음 일일 실행에서 다시 조회합니다. 더 최근 날짜가 먼저 적재되어 그 이전에 빈 날짜가 남은 경우에는 해당 구간을 수동 backfill해야 합니다. 데이터 변환 과정의 모든 결측값을 검증하는 구조는 아니며, 현재 검증은 위에 명시한 항목을 대상으로 합니다.
+
+## 데이터 출처
+
+- KRX Data Marketplace OPEN API
+- 한국거래소 통계정보
+
+API 인증키와 개인 환경변수는 저장소에 포함하지 않습니다.
