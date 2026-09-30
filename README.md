@@ -99,6 +99,8 @@ Trading value spike ratio = 당일 거래대금 / 해당 종목의 전체 조회
 
 `KRX Market Overview` 대시보드는 PostgreSQL의 `kospi_daily_prices`를 연결해 다음 5개 시트로 시장 현황을 보여줍니다.
 
+![KRX Market Overview Dashboard](images/tableau_market_overview.png)
+
 | 시트 | 내용 |
 |---|---|
 | Daily Trading Value | 일별 총 거래대금 추이. 조 원 단위로 표시 |
@@ -129,6 +131,7 @@ images/
   avg_abs_change_by_spike.png
   five_percent_move_frequency.png
   price_direction_by_spike.png
+  tableau_market_overview.png
 tableau/
   krx_market_dashboard.twb
 run_daily_pipeline.bat
